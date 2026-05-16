@@ -17,7 +17,7 @@ const DEFAULT_CONFIG = {
   kids: [
     { id: 'k1', name: 'Liam',   age: 7, color: 'teal',   inputMode: 'pencil', pin: '1111' },
     { id: 'k2', name: 'Camila', age: 9, color: 'coral',  inputMode: 'pencil', pin: '2222' },
-    { id: 'k3', name: '',       age: 0, color: 'indigo', inputMode: 'pencil', pin: '3333', enabled: false },
+    { id: 'k3', name: 'Invité', age: 8, color: 'indigo', inputMode: 'pencil', pin: '3333' },
   ],
   parentPin: '1234',
   parentEmail: '',
@@ -29,11 +29,21 @@ async function loadConfig() {
     const r = await window.storage.get(KEY_CONFIG, SHARED);
     if (r && r.value) {
       const parsed = JSON.parse(r.value);
-      const kids = (parsed.kids || DEFAULT_CONFIG.kids).map((k, i) => ({
-        ...DEFAULT_CONFIG.kids[i], ...k,
-        inputMode: k.inputMode || 'pencil',
-        pin: k.pin || DEFAULT_CONFIG.kids[i]?.pin || '0000',
-      }));
+      const kids = (parsed.kids || DEFAULT_CONFIG.kids).map((k, i) => {
+        const defaults = DEFAULT_CONFIG.kids[i] || {};
+        const merged = {
+          ...defaults, ...k,
+          inputMode: k.inputMode || 'pencil',
+          pin: k.pin || defaults.pin || '0000',
+        };
+        // Migration: remove obsolete "enabled" flag (guest is always active now)
+        delete merged.enabled;
+        // Ensure name is set (especially for k3 / guest)
+        if (!merged.name || !merged.name.trim()) {
+          merged.name = defaults.name || (i === 2 ? 'Invité' : `Enfant ${i + 1}`);
+        }
+        return merged;
+      });
       return { ...DEFAULT_CONFIG, ...parsed, kids };
     }
   } catch (e) {}
@@ -588,10 +598,39 @@ function PinPad({ value, onChange, length = 4, accent = '#1c1917' }) {
 // ============================================================
 function HandwritingCanvas({ onChange, resetSignal, height = 60 }) {
   const canvasRef = useRef(null);
+  const wrapperRef = useRef(null);
   const drawing = useRef(false);
-  const strokesRef = useRef([]); // array of strokes, each = array of {x, y, w}
+  const pointerIdRef = useRef(null);
+  const strokesRef = useRef([]);            // array of strokes, each = array of {x, y, w}
   const currentStrokeRef = useRef(null);
+  const dprRef = useRef(1);
+  const sizeRef = useRef({ w: 0, h: 0 });   // CSS size of canvas
   const [strokeCount, setStrokeCount] = useState(0);
+  const rafRef = useRef(null);
+  const pendingPointsRef = useRef([]);
+
+  // Setup the canvas: size it to its CSS dimensions × DPR
+  const setupCanvas = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return false;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return false;
+    const dpr = window.devicePixelRatio || 1;
+    // Only resize if dimensions changed (avoids wiping the drawing)
+    const needsResize =
+      canvas.width !== Math.round(rect.width * dpr) ||
+      canvas.height !== Math.round(rect.height * dpr);
+    if (needsResize) {
+      canvas.width = Math.round(rect.width * dpr);
+      canvas.height = Math.round(rect.height * dpr);
+    }
+    dprRef.current = dpr;
+    sizeRef.current = { w: rect.width, h: rect.height };
+    const ctx = canvas.getContext('2d');
+    // Reset transform and apply DPR scale
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return true;
+  };
 
   const drawGuides = (ctx, w, h) => {
     ctx.save();
@@ -604,13 +643,17 @@ function HandwritingCanvas({ onChange, resetSignal, height = 60 }) {
     ctx.restore();
   };
 
-  const redraw = () => {
+  const fullRedraw = () => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
-    const rect = canvas.getBoundingClientRect();
+    const { w, h } = sizeRef.current;
+    // Clear with transform reset
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    drawGuides(ctx, rect.width, rect.height);
+    ctx.restore();
+    drawGuides(ctx, w, h);
     ctx.strokeStyle = '#1c1917';
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -626,6 +669,21 @@ function HandwritingCanvas({ onChange, resetSignal, height = 60 }) {
     }
   };
 
+  // Incremental draw a single segment (used during active drawing)
+  const drawSegment = (a, b, width) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    ctx.strokeStyle = '#1c1917';
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.stroke();
+  };
+
   const exportDataUrl = () => {
     const canvas = canvasRef.current;
     if (!canvas || strokesRef.current.length === 0) {
@@ -633,7 +691,8 @@ function HandwritingCanvas({ onChange, resetSignal, height = 60 }) {
       return;
     }
     const ex = document.createElement('canvas');
-    ex.width = 200; ex.height = 70;
+    ex.width = 200;
+    ex.height = 70;
     const exCtx = ex.getContext('2d');
     exCtx.fillStyle = '#faf6ee';
     exCtx.fillRect(0, 0, 200, 70);
@@ -641,63 +700,129 @@ function HandwritingCanvas({ onChange, resetSignal, height = 60 }) {
     onChange(ex.toDataURL('image/jpeg', 0.6));
   };
 
+  // Setup on mount and whenever canvas may have been resized
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    const ctx = canvas.getContext('2d');
-    ctx.scale(dpr, dpr);
-    drawGuides(ctx, rect.width, rect.height);
+    setupCanvas();
+    fullRedraw();
+    // Re-setup on window resize / orientation change
+    const onResize = () => {
+      setupCanvas();
+      fullRedraw();
+    };
+    window.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', onResize);
+    // Use ResizeObserver for layout changes
+    let ro = null;
+    if (window.ResizeObserver && canvasRef.current) {
+      ro = new ResizeObserver(onResize);
+      ro.observe(canvasRef.current);
+    }
+    return () => {
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('orientationchange', onResize);
+      if (ro) ro.disconnect();
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
+    // eslint-disable-next-line
   }, []);
 
+  // Reset on resetSignal change
   useEffect(() => {
     strokesRef.current = [];
     currentStrokeRef.current = null;
     setStrokeCount(0);
-    redraw();
+    pendingPointsRef.current = [];
+    drawing.current = false;
+    setupCanvas();
+    fullRedraw();
     onChange(null);
     // eslint-disable-next-line
   }, [resetSignal]);
 
+  // Get point in CSS coords (NOT scaled by DPR — ctx is already scaled)
   const getPoint = (e) => {
-    const rect = canvasRef.current.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    };
+  };
+
+  // Get stroke width based on pointer type and pressure
+  const getWidth = (e) => {
+    if (e.pointerType === 'pen') {
+      const p = (typeof e.pressure === 'number' && e.pressure > 0) ? e.pressure : 0.5;
+      return 1.5 + p * 3.5;  // 1.5 to 5 px
+    }
+    // touch or mouse
+    return 2.5;
+  };
+
+  // Schedule a draw of pending points (smooth animation)
+  const flushPending = () => {
+    rafRef.current = null;
+    const pts = pendingPointsRef.current;
+    pendingPointsRef.current = [];
+    const stroke = currentStrokeRef.current;
+    if (!stroke || pts.length === 0) return;
+    for (const pt of pts) {
+      const prev = stroke[stroke.length - 1];
+      stroke.push(pt);
+      if (prev) drawSegment(prev, pt, pt.w);
+    }
   };
 
   const start = (e) => {
+    // Prevent the browser from scrolling / triggering scribble
     e.preventDefault();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    // Ensure canvas is correctly sized (in case it was hidden then shown)
+    setupCanvas();
+    // Capture pointer so we keep receiving events even if finger leaves canvas
+    try {
+      canvas.setPointerCapture(e.pointerId);
+      pointerIdRef.current = e.pointerId;
+    } catch (err) {}
     drawing.current = true;
-    const pressure = e.pointerType === 'pen' && e.pressure > 0 ? e.pressure : 0.5;
     const pt = getPoint(e);
-    const w = 2 + pressure * 3;
+    const w = getWidth(e);
     currentStrokeRef.current = [{ ...pt, w }];
+    // Draw a tiny dot so a single tap leaves a mark
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#1c1917';
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, w / 2, 0, Math.PI * 2);
+    ctx.fill();
   };
+
   const move = (e) => {
     if (!drawing.current) return;
+    if (pointerIdRef.current !== null && e.pointerId !== pointerIdRef.current) return;
     e.preventDefault();
-    const ctx = canvasRef.current.getContext('2d');
     const pt = getPoint(e);
-    const pressure = e.pointerType === 'pen' && e.pressure > 0 ? e.pressure : 0.5;
-    const w = 2 + pressure * 3;
-    const stroke = currentStrokeRef.current;
-    const prev = stroke[stroke.length - 1];
-    stroke.push({ ...pt, w });
-    ctx.strokeStyle = '#1c1917';
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.lineWidth = w;
-    ctx.beginPath();
-    ctx.moveTo(prev.x, prev.y);
-    ctx.lineTo(pt.x, pt.y);
-    ctx.stroke();
+    const w = getWidth(e);
+    pendingPointsRef.current.push({ ...pt, w });
+    if (rafRef.current === null) {
+      rafRef.current = requestAnimationFrame(flushPending);
+    }
   };
-  const end = () => {
+
+  const end = (e) => {
     if (!drawing.current) return;
     drawing.current = false;
-    if (currentStrokeRef.current && currentStrokeRef.current.length > 1) {
+    // Flush remaining points immediately
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+      flushPending();
+    }
+    if (canvasRef.current && pointerIdRef.current !== null) {
+      try { canvasRef.current.releasePointerCapture(pointerIdRef.current); } catch (err) {}
+      pointerIdRef.current = null;
+    }
+    if (currentStrokeRef.current && currentStrokeRef.current.length >= 1) {
       strokesRef.current.push(currentStrokeRef.current);
       setStrokeCount(strokesRef.current.length);
       exportDataUrl();
@@ -709,27 +834,42 @@ function HandwritingCanvas({ onChange, resetSignal, height = 60 }) {
     if (strokesRef.current.length === 0) return;
     strokesRef.current.pop();
     setStrokeCount(strokesRef.current.length);
-    redraw();
+    setupCanvas();
+    fullRedraw();
     exportDataUrl();
   };
 
   const clearAll = () => {
     strokesRef.current = [];
     setStrokeCount(0);
-    redraw();
+    setupCanvas();
+    fullRedraw();
     onChange(null);
   };
 
   const hasInk = strokeCount > 0;
 
   return (
-    <div className="select-none">
+    <div className="select-none" ref={wrapperRef} style={{ touchAction: 'none' }}>
       <div className="rounded-lg border-2 border-stone-300 bg-white overflow-hidden relative"
-        style={{ borderColor: hasInk ? '#a8a29e' : '#d6d3d1' }}>
-        <canvas ref={canvasRef} className="block w-full touch-none"
-          style={{ height: `${height}px` }}
-          onPointerDown={start} onPointerMove={move} onPointerUp={end}
-          onPointerCancel={end} onPointerLeave={end} />
+        style={{ borderColor: hasInk ? '#a8a29e' : '#d6d3d1', touchAction: 'none' }}>
+        <canvas ref={canvasRef}
+          className="block w-full"
+          style={{
+            height: `${height}px`,
+            touchAction: 'none',
+            // Critical for iOS Safari to allow Apple Pencil input
+            WebkitUserSelect: 'none',
+            userSelect: 'none',
+            WebkitTouchCallout: 'none',
+            display: 'block',
+          }}
+          onPointerDown={start}
+          onPointerMove={move}
+          onPointerUp={end}
+          onPointerCancel={end}
+          onPointerLeave={end}
+        />
         {!hasInk && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
             <div className="text-stone-300 text-[11px] uppercase tracking-widest">✎ écris ici</div>
@@ -765,6 +905,37 @@ function KumonWorksheetPage({ pageRef: ref, problems, startIndex, values, drawin
         {problems.map((p, i) => {
           const globalNum = startIndex + i + 1;
           const isFocused = focusedIdx === i;
+          // Use column layout for 2+ digit operands (like Kumon classic format)
+          const useColumn = (p.a >= 10 || p.b >= 10) && (p.op === '+' || p.op === '−' || p.op === '×' || p.op === '÷');
+          if (useColumn) {
+            const expectedAnswer =
+              p.op === '+' ? p.a + p.b :
+              p.op === '−' ? p.a - p.b :
+              p.op === '×' ? p.a * p.b :
+              p.op === '÷' ? Math.floor(p.a / p.b) :
+              0;
+            return (
+              <div key={i} className="flex items-start gap-2 sm:gap-4">
+                <div className="font-kumon text-stone-400 text-xs sm:text-sm tabular-nums w-7 sm:w-9 text-right shrink-0 pt-3">
+                  ({globalNum})
+                </div>
+                <div className="flex-1 flex justify-start" onClick={() => onFocus(i)}>
+                  <ColumnProblem
+                    a={p.a} b={p.b} op={p.op}
+                    answer={expectedAnswer}
+                    currentInput={values[i] || ''}
+                    inputMode={mode}
+                    accent={accent}
+                    onInkChange={(pos, url) => onDrawingChange(i, url)}
+                    showCarries={true}
+                    feedback={null}
+                    resetSignal={`${ref}-${i}`}
+                  />
+                </div>
+              </div>
+            );
+          }
+          // Original horizontal layout for 1-digit operands
           return (
             <div key={i} className="flex items-center gap-2 sm:gap-4">
               <div className="font-kumon text-stone-400 text-xs sm:text-sm tabular-nums w-7 sm:w-9 text-right shrink-0">
@@ -845,6 +1016,342 @@ function WordProblemPage({ pageRef: ref, wordProblem, value, drawing, onValueCha
 }
 
 // ============================================================
+// COLUMN PROBLEM (Kumon-style vertical math layout)
+// ============================================================
+
+// Helper : Calcule les retenues pour une addition
+// Retourne un tableau de retenues par position (de droite à gauche)
+// Ex: 47 + 38 → unités: 7+8=15 → retenue 1 → tens: 4+3+1=8 → pas de retenue
+// Returns [1, 0] (carries above tens column, then hundreds — none)
+// ───────────────────────────────────────────────────────────────
+function computeAddCarries(a, b) {
+  const digitsA = String(a).split('').reverse().map(Number);
+  const digitsB = String(b).split('').reverse().map(Number);
+  const maxLen = Math.max(digitsA.length, digitsB.length);
+  const carries = [];
+  let carry = 0;
+  for (let i = 0; i < maxLen; i++) {
+    const da = digitsA[i] || 0;
+    const db = digitsB[i] || 0;
+    const sum = da + db + carry;
+    carry = Math.floor(sum / 10);
+    carries.push(carry);
+  }
+  // carries[i] = retenue produite par la colonne i, à afficher au-dessus de la colonne i+1
+  return carries;
+}
+
+// Helper : Calcule les emprunts pour une soustraction
+// Retourne pour chaque chiffre du minuende, sa nouvelle valeur après emprunts (ou null si inchangé)
+// Ex: 52 − 27 → unités: 2 < 7, on emprunte → 12 et le 5 devient 4
+//   Returns { borrowed: [12, 4], canceled: [null, 5] }
+// canceled[i] = nombre barré (ancien chiffre) à la position i
+// borrowed[i] = nouveau chiffre à afficher (au-dessus, en plus petit)
+function computeSubBorrows(a, b) {
+  const digitsA = String(a).split('').reverse().map(Number);
+  const digitsB = String(b).split('').reverse().map(Number);
+  const newDigits = [...digitsA];  // we'll mutate
+  const canceled = digitsA.map(() => null);
+  const borrowed = digitsA.map(() => null);
+  for (let i = 0; i < newDigits.length; i++) {
+    const db = digitsB[i] || 0;
+    if (newDigits[i] < db) {
+      // Need to borrow from next column
+      let j = i + 1;
+      while (j < newDigits.length && newDigits[j] === 0) {
+        canceled[j] = newDigits[j];
+        borrowed[j] = 9;
+        newDigits[j] = 9;
+        j++;
+      }
+      if (j < newDigits.length) {
+        canceled[j] = newDigits[j];
+        borrowed[j] = newDigits[j] - 1;
+        newDigits[j] -= 1;
+      }
+      canceled[i] = newDigits[i];
+      borrowed[i] = newDigits[i] + 10;
+      newDigits[i] += 10;
+    }
+  }
+  return { canceled, borrowed };
+}
+
+// ───────────────────────────────────────────────────────────────
+// MAIN COMPONENT : <ColumnProblem>
+// ───────────────────────────────────────────────────────────────
+// Props:
+//   a, b           — numbers (a is the top, b is the bottom)
+//   op             — '+', '−', '×', '÷'
+//   answer         — expected answer (for validation)
+//   currentInput   — string of digits typed so far (right-to-left)
+//   inputMode      — 'keypad' | 'pencil' | 'manual'
+//   accent         — color
+//   onInkChange    — for pencil mode, callback with dataURL per case
+//   showCarries    — boolean, whether to display carries (parent setting)
+//   feedback       — 'correct' | 'wrong' | null (display feedback)
+//   resetSignal    — increments to reset pencil canvases
+// ───────────────────────────────────────────────────────────────
+function ColumnProblem({
+  a, b, op, answer, currentInput = '',
+  inputMode = 'keypad',
+  accent = '#1c1917',
+  onInkChange,
+  showCarries = true,
+  feedback = null,
+  resetSignal = 0,
+}) {
+  // Determine number of digits for display
+  const aStr = String(a);
+  const bStr = String(b);
+  const answerStr = String(answer);
+  // Width = max digits needed (could be answer length, which is usually >= aStr/bStr length)
+  const width = Math.max(aStr.length, bStr.length, answerStr.length);
+
+  // Pad each with leading spaces to align right
+  const aPadded = aStr.padStart(width, ' ');
+  const bPadded = bStr.padStart(width, ' ');
+
+  // Carries / borrows (only computed for visual aid)
+  const carries = useMemo(() => {
+    if (!showCarries) return [];
+    if (op === '+') return computeAddCarries(a, b);
+    return [];
+  }, [a, b, op, showCarries]);
+
+  const borrows = useMemo(() => {
+    if (!showCarries) return { canceled: [], borrowed: [] };
+    if (op === '−') return computeSubBorrows(a, b);
+    return { canceled: [], borrowed: [] };
+  }, [a, b, op, showCarries]);
+
+  // For displaying typed answer: right-align the digits in `currentInput`
+  // Each case at position `i` (from right) shows currentInput[currentInput.length - 1 - i] if exists
+  const inputDigits = String(currentInput || '').split('');
+  // Determine how many cases (digits) the answer slot has
+  const answerLen = answerStr.length;
+  // For each position from right (0..answerLen-1), what digit?
+  const getDigitAtPos = (posFromRight) => {
+    const idx = inputDigits.length - 1 - posFromRight;
+    return idx >= 0 ? inputDigits[idx] : null;
+  };
+
+  // Calculate which carry to show: carry produced by column i goes ABOVE column i+1
+  // carries[i] = digit (0 or 1 typically)
+  const getCarryAtPos = (posFromRight) => {
+    // Carry shown above column posFromRight = carry produced by column (posFromRight - 1)
+    if (posFromRight === 0) return 0;  // no carry above units
+    return carries[posFromRight - 1] || 0;
+  };
+
+  // How many digits has the user typed?
+  const typedCount = inputDigits.length;
+
+  // Sizes
+  const cellSize = inputMode === 'pencil' ? 56 : 44;
+  const digitSize = inputMode === 'pencil' ? 'text-3xl' : 'text-3xl';
+  const gap = 4;
+
+  // Generate column index array (rightmost = 0)
+  const colIndices = Array.from({ length: width }, (_, i) => width - 1 - i);
+  const answerColIndices = Array.from({ length: answerLen }, (_, i) => answerLen - 1 - i);
+
+  // Spacing for op sign and answer indent
+  const totalWidth = width * cellSize + (width - 1) * gap;
+  const opSignWidth = 24;
+  const containerWidth = opSignWidth + 8 + totalWidth;
+
+  return (
+    <div className="select-none inline-block">
+      <div className="relative font-display tabular-nums"
+        style={{ width: containerWidth, minWidth: 'min-content' }}>
+
+        {/* ROW 1 : Carries (or borrows) ─ small digits above */}
+        {showCarries && (op === '+' || op === '−') && (
+          <div className="flex justify-end items-end" style={{ height: 20, marginBottom: 2, gap }}>
+            <div style={{ width: opSignWidth + 8 }} />
+            {colIndices.map((posFromRight) => {
+              if (op === '+') {
+                const carry = getCarryAtPos(posFromRight);
+                // Only show carry if user has typed past the column that produces it
+                const colThatProduces = posFromRight - 1;
+                const shouldShow = carry > 0 && typedCount > colThatProduces + 1;
+                return (
+                  <div key={posFromRight}
+                    className="flex items-center justify-center text-sm font-bold"
+                    style={{
+                      width: cellSize,
+                      color: shouldShow ? accent : 'transparent',
+                      transition: 'color 0.2s',
+                      transform: shouldShow ? 'scale(1)' : 'scale(0.5)',
+                      transitionProperty: 'color, transform',
+                    }}>
+                    {shouldShow ? carry : '·'}
+                  </div>
+                );
+              } else if (op === '−') {
+                // Show the new (borrowed) digit if it was modified
+                const newDigit = borrows.borrowed[posFromRight];
+                const shouldShow = newDigit !== null && newDigit !== undefined;
+                return (
+                  <div key={posFromRight}
+                    className="flex items-center justify-center text-sm font-bold"
+                    style={{
+                      width: cellSize,
+                      color: shouldShow ? accent : 'transparent',
+                    }}>
+                    {shouldShow ? newDigit : '·'}
+                  </div>
+                );
+              }
+              return <div key={posFromRight} style={{ width: cellSize }} />;
+            })}
+          </div>
+        )}
+
+        {/* ROW 2 : Top number (a) */}
+        <div className="flex justify-end items-center" style={{ gap, marginBottom: 2 }}>
+          <div style={{ width: opSignWidth + 8 }} />
+          {colIndices.map((posFromRight) => {
+            const charIdx = width - 1 - posFromRight;
+            const digit = aPadded[charIdx];
+            const isDigit = digit !== ' ';
+            const isCanceled = op === '−' && borrows.canceled[posFromRight] !== null;
+            return (
+              <div key={posFromRight}
+                className={`flex items-center justify-center ${digitSize} relative`}
+                style={{ width: cellSize, height: cellSize, color: '#1c1917' }}>
+                <span style={{
+                  textDecoration: isCanceled && showCarries ? 'line-through' : 'none',
+                  textDecorationColor: accent,
+                  opacity: isCanceled && showCarries ? 0.55 : 1,
+                }}>
+                  {isDigit ? digit : ''}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* ROW 3 : Op sign + Bottom number (b) */}
+        <div className="flex justify-end items-center" style={{ gap, marginBottom: 2 }}>
+          <div className={`text-3xl font-bold flex items-center justify-end`}
+            style={{ width: opSignWidth + 8, color: '#1c1917', paddingRight: 6 }}>
+            {op}
+          </div>
+          {colIndices.map((posFromRight) => {
+            const charIdx = width - 1 - posFromRight;
+            const digit = bPadded[charIdx];
+            const isDigit = digit !== ' ';
+            return (
+              <div key={posFromRight}
+                className={`flex items-center justify-center ${digitSize}`}
+                style={{ width: cellSize, height: cellSize, color: '#1c1917' }}>
+                {isDigit ? digit : ''}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* ROW 4 : Horizontal line */}
+        <div className="flex justify-end items-center" style={{ gap }}>
+          <div style={{ width: opSignWidth + 8 }} />
+          <div className="h-0.5 rounded-full" style={{
+            width: width * cellSize + (width - 1) * gap,
+            background: '#1c1917',
+          }} />
+        </div>
+
+        {/* ROW 5 : Answer cells */}
+        <div className="flex justify-end items-center" style={{ gap, marginTop: 8 }}>
+          <div style={{ width: opSignWidth + 8 }} />
+          {/* Spacer cells if answer is shorter than width */}
+          {Array.from({ length: width - answerLen }, (_, i) => (
+            <div key={`spacer-${i}`} style={{ width: cellSize, height: cellSize }} />
+          ))}
+          {answerColIndices.map((posFromRight) => {
+            const digit = getDigitAtPos(posFromRight);
+            const hasDigit = digit !== null;
+            const isCorrectFeedback = feedback === 'correct';
+            const isWrongFeedback = feedback === 'wrong';
+            const isNextSlot = !hasDigit && posFromRight === answerLen - 1 - typedCount;
+
+            if (inputMode === 'pencil') {
+              // For pencil mode, each cell is a HandwritingCanvas
+              return (
+                <div key={posFromRight}
+                  className="rounded-lg border-2 overflow-hidden"
+                  style={{
+                    width: cellSize, height: cellSize,
+                    borderColor: isCorrectFeedback ? '#10b981' :
+                                 isWrongFeedback ? '#dc2626' :
+                                 hasDigit ? accent : '#d6d3d1',
+                    background: 'white',
+                  }}>
+                  <ColumnPencilCell
+                    cellId={`${a}-${b}-${op}-pos${posFromRight}`}
+                    onChange={(dataUrl) => onInkChange && onInkChange(posFromRight, dataUrl)}
+                    resetSignal={resetSignal}
+                    size={cellSize}
+                  />
+                </div>
+              );
+            }
+
+            return (
+              <div key={posFromRight}
+                className={`rounded-lg border-2 flex items-center justify-center ${digitSize} font-bold transition-all`}
+                style={{
+                  width: cellSize, height: cellSize,
+                  borderColor: isCorrectFeedback ? '#10b981' :
+                               isWrongFeedback ? '#dc2626' :
+                               hasDigit ? accent :
+                               isNextSlot ? accent + '80' : '#d6d3d1',
+                  background: hasDigit ? (isCorrectFeedback ? '#d1fae5' : isWrongFeedback ? '#fee2e2' : 'white') : 'white',
+                  color: isCorrectFeedback ? '#065f46' :
+                         isWrongFeedback ? '#991b1b' :
+                         hasDigit ? accent : '#a8a29e',
+                  boxShadow: isNextSlot && !hasDigit ? `0 0 0 3px ${accent}25` : 'none',
+                  transform: hasDigit ? 'scale(1)' : isNextSlot ? 'scale(1.02)' : 'scale(1)',
+                  animation: hasDigit ? 'cellPop 0.18s ease-out' : 'none',
+                }}>
+                {digit || (isNextSlot ? '·' : '')}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Animation keyframes - injected once globally would be better but inline is OK */}
+        <style>{`
+          @keyframes cellPop {
+            0% { transform: scale(0.7); }
+            70% { transform: scale(1.12); }
+            100% { transform: scale(1); }
+          }
+        `}</style>
+      </div>
+    </div>
+  );
+}
+
+// ───────────────────────────────────────────────────────────────
+// Sub-component : Small pencil cell for pencil mode
+// (reuses HandwritingCanvas logic but smaller)
+// ───────────────────────────────────────────────────────────────
+function ColumnPencilCell({ cellId, onChange, resetSignal, size }) {
+  // Just a smaller version of HandwritingCanvas, no labels
+  return (
+    <div style={{ width: size, height: size, touchAction: 'none' }}>
+      <HandwritingCanvas
+        onChange={onChange}
+        resetSignal={resetSignal}
+        height={size}
+      />
+    </div>
+  );
+}
+
+// ============================================================
 // NUMBER PAD
 // ============================================================
 function NumPad({ onDigit, onClear, onNext }) {
@@ -888,7 +1395,7 @@ function KidPicker({ config, sessions, progress, manualUnlocks, onPickKid, onPic
   const todayStr = today.toLocaleDateString('fr-CA', { weekday: 'long', day: 'numeric', month: 'long' });
   const pendingReview = sessions.filter(s => s.needsReview).length;
   const visibleKids = config.kids.filter(k => {
-    if (k.enabled === false) return false;
+    // Guest is always active now (enabled flag removed). Only hide if no name.
     if (!k.name || k.name.trim() === '') return false;
     if (lockedKidId && k.id !== lockedKidId) return false;
     return true;
@@ -1620,6 +2127,29 @@ function Booklet({ kid, level, bookletNum, onComplete, onAbort }) {
                   const isCorrect = p.firstTryCorrect;
                   const ua = parseInt(correctingValues[i], 10);
                   const nowCorrect = !isCorrect && ua === p.answer;
+                  const useColumn = (p.a >= 10 || p.b >= 10) && (p.op === '+' || p.op === '−' || p.op === '×' || p.op === '÷');
+                  if (useColumn) {
+                    return (
+                      <div key={i} className="flex items-start gap-2 sm:gap-4">
+                        <div className="font-kumon text-stone-400 text-xs sm:text-sm tabular-nums w-7 sm:w-9 text-right shrink-0 pt-3">
+                          ({globalNum})
+                        </div>
+                        <div className="flex-1 flex justify-start" onClick={() => setFocusedIdx(i)}>
+                          <ColumnProblem
+                            a={p.a} b={p.b} op={p.op}
+                            answer={p.answer}
+                            currentInput={isCorrect ? String(p.answer) : (correctingValues[i] || '')}
+                            inputMode={mode === 'manual' ? 'keypad' : mode}
+                            accent={isCorrect ? '#047857' : nowCorrect ? '#047857' : '#be123c'}
+                            showCarries={true}
+                            feedback={isCorrect || nowCorrect ? 'correct' : null}
+                            resetSignal={`${correctRef}-${i}-review`}
+                          />
+                          {(isCorrect || nowCorrect) && <span className="text-emerald-600 text-xl ml-2 self-center">✓</span>}
+                        </div>
+                      </div>
+                    );
+                  }
                   return (
                     <div key={i} className="flex items-center gap-2 sm:gap-4">
                       <div className="font-kumon text-stone-400 text-xs sm:text-sm tabular-nums w-7 sm:w-9 text-right shrink-0">
@@ -2123,7 +2653,7 @@ function ParentDashboard({ config, sessions, progress, manualUnlocks, onUpdateCo
 }
 
 function OverviewTab({ config, sessions, progress, manualUnlocks }) {
-  const visibleKids = config.kids.filter(k => k.enabled !== false && k.name?.trim());
+  const visibleKids = config.kids.filter(k => k.name?.trim());
   const chartData = useMemo(() => {
     const days = 14;
     const today = new Date();
@@ -2210,7 +2740,7 @@ function OverviewTab({ config, sessions, progress, manualUnlocks }) {
 
 // New tab: time per booklet
 function TimeTab({ config, sessions }) {
-  const visibleKids = config.kids.filter(k => k.enabled !== false && k.name?.trim());
+  const visibleKids = config.kids.filter(k => k.name?.trim());
   const [selectedKidId, setSelectedKidId] = useState(visibleKids[0]?.id);
   const kid = config.kids.find(k => k.id === selectedKidId);
   const kSessions = sessions.filter(s => s.kidId === selectedKidId && !s.needsReview)
@@ -2398,7 +2928,7 @@ function TimeTab({ config, sessions }) {
 }
 
 function ProgressionTab({ config, progress, manualUnlocks, onResetProgress, onToggleManualUnlock, onSetCompletedBooklets }) {
-  const visibleKids = config.kids.filter(k => k.enabled !== false && k.name?.trim());
+  const visibleKids = config.kids.filter(k => k.name?.trim());
   const [selectedKidId, setSelectedKidId] = useState(visibleKids[0]?.id);
   const [editingLevel, setEditingLevel] = useState(null);
   const kid = config.kids.find(k => k.id === selectedKidId);
@@ -2700,7 +3230,7 @@ function ReviewModal({ session, kid, onSave, onClose }) {
 
 function SessionsTab({ config, sessions, onSelect, onDelete }) {
   const [filter, setFilter] = useState('all');
-  const visibleKids = config.kids.filter(k => k.enabled !== false && k.name?.trim());
+  const visibleKids = config.kids.filter(k => k.name?.trim());
   const filtered = filter === 'all' ? sessions : sessions.filter(s => s.kidId === filter);
 
   return (
@@ -2849,31 +3379,21 @@ function SettingsTab({ config, onUpdate }) {
         <div className="space-y-4">
           {draft.kids.map((kid, idx) => {
             const c = KID_COLORS[kid.color] || KID_COLORS.teal;
-            const isGuest = idx === 2;
-            const isEnabled = kid.enabled !== false;
             return (
               <div key={kid.id} className="border-2 rounded-xl p-4"
-                style={{ borderColor: c.ink + '40', opacity: !isEnabled && isGuest ? 0.6 : 1 }}>
+                style={{ borderColor: c.ink + '40' }}>
                 <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
                   <div className="text-xs uppercase tracking-widest text-stone-500">
-                    {idx === 0 ? '1er enfant' : idx === 1 ? '2e enfant' : '3e enfant (invité)'}
+                    {idx === 0 ? '1er enfant' : idx === 1 ? '2e enfant' : '3e enfant'}
                   </div>
-                  {isGuest && (
-                    <label className="flex items-center gap-2 text-sm cursor-pointer">
-                      <input type="checkbox" checked={isEnabled}
-                        onChange={e => updateKid(idx, 'enabled', e.target.checked)} />
-                      <span>Actif</span>
-                    </label>
-                  )}
                 </div>
-                {(!isGuest || isEnabled) && (
-                  <>
+                <>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <label className="block">
                         <div className="text-[10px] uppercase tracking-widest text-stone-500 mb-1">Prénom</div>
                         <input type="text" value={kid.name}
                           onChange={e => updateKid(idx, 'name', e.target.value)}
-                          placeholder={isGuest ? 'Nom de l\'invité' : ''}
+                          placeholder={idx === 2 ? 'Nom du 3e enfant' : ''}
                           className="w-full px-3 py-2 border border-stone-300 rounded-lg text-sm" />
                       </label>
                       <label className="block">
@@ -2912,7 +3432,6 @@ function SettingsTab({ config, onUpdate }) {
                       </div>
                     </div>
                   </>
-                )}
               </div>
             );
           })}
@@ -2929,7 +3448,7 @@ function SettingsTab({ config, onUpdate }) {
             className={`px-3 py-2 rounded-lg text-sm transition-all ${!draft.deviceLockedToKid ? 'bg-stone-900 text-white' : 'bg-stone-100 text-stone-700 hover:bg-stone-200'}`}>
             Aucun (tous visibles)
           </button>
-          {draft.kids.filter(k => k.enabled !== false && k.name?.trim()).map(k => {
+          {draft.kids.filter(k => k.name?.trim()).map(k => {
             const c = KID_COLORS[k.color] || KID_COLORS.teal;
             const isActive = draft.deviceLockedToKid === k.id;
             return (
@@ -2950,7 +3469,7 @@ function SettingsTab({ config, onUpdate }) {
             Une fois l'app déployée, chaque enfant peut avoir son propre lien. Sur son iPad, l'enfant ouvre uniquement son URL.
           </div>
           <div className="space-y-2">
-            {draft.kids.filter(k => k.enabled !== false && k.name?.trim()).map(k => (
+            {draft.kids.filter(k => k.name?.trim()).map(k => (
               <div key={k.id} className="flex items-center gap-2 flex-wrap text-sm">
                 <div className="w-20 font-medium text-stone-700">{k.name}</div>
                 <code className="flex-1 px-2 py-1 bg-stone-100 rounded text-xs text-stone-700 truncate">
