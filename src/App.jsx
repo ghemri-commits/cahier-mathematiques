@@ -292,6 +292,31 @@ function generateWordProblem(levelId, bookletNum) {
 }
 
 // ============================================================
+// PROBLEM HELPERS
+// ============================================================
+
+// Returns true if at least one problem on the page requires column layout
+// (i.e., any operand is 2+ digits with +/-/×/÷). This means the WHOLE page
+// will be rendered in column format for consistency.
+function pageUsesColumnLayout(problems) {
+  if (!problems || problems.length === 0) return false;
+  return problems.some(p =>
+    (p.a >= 10 || p.b >= 10) &&
+    (p.op === '+' || p.op === '−' || p.op === '×' || p.op === '÷')
+  );
+}
+
+// Returns true if a specific problem is "filled" — meaning the kid has
+// produced either a typed value (keypad / pencil-as-text) OR an ink drawing
+// (manual mode OR pencil mode on a column-format problem).
+// This is the unified completion check that fixes the "page stuck" bug.
+function isProblemFilled(values, drawings, i) {
+  const hasValue = values && values[i] && values[i] !== '';
+  const hasDrawing = drawings && drawings[i];
+  return hasValue || hasDrawing;
+}
+
+// ============================================================
 // PROBLEM GENERATORS (regular pages)
 // ============================================================
 function generateProblemsForPage(levelId, bookletNum, pageNum) {
@@ -895,18 +920,44 @@ function HandwritingCanvas({ onChange, resetSignal, height = 60 }) {
 // ============================================================
 // KUMON WORKSHEET PAGE
 // ============================================================
-function KumonWorksheetPage({ pageRef: ref, problems, startIndex, values, drawings, onValueChange, onDrawingChange, onFocus, focusedIdx, mode, accent }) {
+function KumonWorksheetPage({ pageRef: ref, problems, startIndex, values, drawings, onValueChange, onDrawingChange, onFocus, focusedIdx, mode, accent, eraserMode = false, onToggleEraser, onClearProblem, clearCounters = {} }) {
+  // PAGE-WIDE format: if any problem on this page needs column layout, ALL problems use column.
+  // This avoids mixing horizontal & vertical layouts on the same page (confusing for kids).
+  const pageUsesColumn = pageUsesColumnLayout(problems);
+  // Eraser is useful in pencil and manual modes (where the kid draws)
+  const showEraserButton = mode === 'pencil' || mode === 'manual';
   return (
     <div className="bg-white rounded-2xl shadow-sm p-6 sm:p-10 max-w-2xl mx-auto" style={{ minHeight: 500 }}>
-      <div className="font-kumon text-xl sm:text-2xl text-stone-900 tracking-wide tabular-nums">
-        {ref.trim()}
+      <div className="flex items-start justify-between gap-3 mb-2">
+        <div className="font-kumon text-xl sm:text-2xl text-stone-900 tracking-wide tabular-nums">
+          {ref.trim()}
+        </div>
+        {showEraserButton && (
+          <button onClick={() => onToggleEraser && onToggleEraser()}
+            className="rounded-xl px-3 py-2 flex items-center gap-2 text-sm font-medium transition-all active:scale-95"
+            style={{
+              background: eraserMode ? accent : '#f5f5f4',
+              color: eraserMode ? 'white' : '#44403c',
+              border: `2px solid ${eraserMode ? accent : '#e7e5e4'}`,
+            }}
+            aria-label={eraserMode ? 'Désactiver la gomme' : 'Activer la gomme'}>
+            <span style={{ fontSize: '1.25rem', lineHeight: 1 }}>🧽</span>
+            <span className="hidden sm:inline">{eraserMode ? 'Gomme active' : 'Gomme'}</span>
+          </button>
+        )}
       </div>
-      <div className="mt-8 sm:mt-12 space-y-4 sm:space-y-5">
+      {eraserMode && (
+        <div className="mb-4 rounded-xl px-3 py-2 text-sm"
+          style={{ background: accent + '15', color: accent, border: `1px dashed ${accent}` }}>
+          ✋ Touche une réponse pour l'effacer
+        </div>
+      )}
+      <div className="mt-4 sm:mt-8 space-y-4 sm:space-y-5">
         {problems.map((p, i) => {
           const globalNum = startIndex + i + 1;
           const isFocused = focusedIdx === i;
-          // Use column layout for 2+ digit operands (like Kumon classic format)
-          const useColumn = (p.a >= 10 || p.b >= 10) && (p.op === '+' || p.op === '−' || p.op === '×' || p.op === '÷');
+          // Use column layout if THE PAGE uses column layout (uniform per page)
+          const useColumn = pageUsesColumn && (p.op === '+' || p.op === '−' || p.op === '×' || p.op === '÷');
           if (useColumn) {
             const expectedAnswer =
               p.op === '+' ? p.a + p.b :
@@ -919,7 +970,12 @@ function KumonWorksheetPage({ pageRef: ref, problems, startIndex, values, drawin
                 <div className="font-kumon text-stone-400 text-xs sm:text-sm tabular-nums w-7 sm:w-9 text-right shrink-0 pt-3">
                   ({globalNum})
                 </div>
-                <div className="flex-1 flex justify-start" onClick={() => onFocus(i)}>
+                <div className="flex-1 flex justify-start"
+                  onClick={() => {
+                    if (eraserMode && onClearProblem) onClearProblem(i);
+                    else onFocus(i);
+                  }}
+                  style={{ cursor: eraserMode ? 'pointer' : 'auto' }}>
                   <ColumnProblem
                     a={p.a} b={p.b} op={p.op}
                     answer={expectedAnswer}
@@ -929,7 +985,7 @@ function KumonWorksheetPage({ pageRef: ref, problems, startIndex, values, drawin
                     onInkChange={(pos, url) => onDrawingChange(i, url)}
                     showCarries={true}
                     feedback={null}
-                    resetSignal={`${ref}-${i}`}
+                    resetSignal={`${ref}-${i}-${clearCounters[i] || 0}`}
                   />
                 </div>
               </div>
@@ -937,7 +993,11 @@ function KumonWorksheetPage({ pageRef: ref, problems, startIndex, values, drawin
           }
           // Original horizontal layout for 1-digit operands
           return (
-            <div key={i} className="flex items-center gap-2 sm:gap-4">
+            <div key={i} className="flex items-center gap-2 sm:gap-4"
+              onClick={() => {
+                if (eraserMode && onClearProblem) onClearProblem(i);
+              }}
+              style={{ cursor: eraserMode ? 'pointer' : 'auto' }}>
               <div className="font-kumon text-stone-400 text-xs sm:text-sm tabular-nums w-7 sm:w-9 text-right shrink-0">
                 ({globalNum})
               </div>
@@ -949,7 +1009,13 @@ function KumonWorksheetPage({ pageRef: ref, problems, startIndex, values, drawin
                 {mode === 'manual' ? (
                   <div className="flex-1 max-w-[180px]">
                     <HandwritingCanvas onChange={(d) => onDrawingChange(i, d)}
-                      resetSignal={`${ref}-${i}`} height={60} />
+                      resetSignal={`${ref}-${i}-${clearCounters[i] || 0}`} height={60} />
+                  </div>
+                ) : mode === 'pencil' ? (
+                  <div className="flex-1 max-w-[180px]"
+                    onClick={(e) => { if (!eraserMode) { e.stopPropagation(); onFocus(i); } }}>
+                    <HandwritingCanvas onChange={(d) => onDrawingChange(i, d)}
+                      resetSignal={`${ref}-${i}-${clearCounters[i] || 0}`} height={60} />
                   </div>
                 ) : (
                   <input
@@ -1689,6 +1755,12 @@ function Booklet({ kid, level, bookletNum, onComplete, onAbort }) {
   const [pageData, setPageData] = useState({}); // Holds answers for each page
   const [focusedIdx, setFocusedIdx] = useState(0);
 
+  // Eraser mode: when true, tapping a problem cell clears its drawing/value
+  const [eraserMode, setEraserMode] = useState(false);
+  // clearCounters: incremented per-problem when the eraser is used,
+  // forces the corresponding HandwritingCanvas to reset visually.
+  const [clearCounters, setClearCounters] = useState({});
+
   // Phase: 'doing' (filling all pages) | 'reviewing' (showing results) | 'correcting' (per-page redo)
   const [phase, setPhase] = useState('doing');
   // After review: track which problems were correct on first try
@@ -1780,7 +1852,7 @@ function Booklet({ kid, level, bookletNum, onComplete, onAbort }) {
       return mode === 'manual' ? !!currentPageData.wordDrawing : !!currentPageData.wordValue;
     }
     return problems.every((_, i) =>
-      mode === 'manual' ? currentPageData.drawings[i] : (currentPageData.values[i] && currentPageData.values[i] !== '')
+      isProblemFilled(currentPageData.values, currentPageData.drawings, i)
     );
   };
 
@@ -1789,6 +1861,8 @@ function Booklet({ kid, level, bookletNum, onComplete, onAbort }) {
     if (newIdx < 0 || newIdx >= PAGES_PER_BOOKLET) return;
     setPageIdx(newIdx);
     setFocusedIdx(0);
+    setClearCounters({});  // Reset eraser counters for the new page
+    setEraserMode(false);  // Also turn off eraser when changing pages
   };
 
   const allPagesFilled = useMemo(() => {
@@ -1801,7 +1875,7 @@ function Booklet({ kid, level, bookletNum, onComplete, onAbort }) {
       } else {
         const probs = generateProblemsForPage(level.id, bookletNum, p + 1);
         const filled = probs.every((_, i) =>
-          mode === 'manual' ? data.drawings[i] : (data.values[i] && data.values[i] !== '')
+          isProblemFilled(data.values, data.drawings, i)
         );
         if (!filled) return false;
       }
@@ -2122,12 +2196,13 @@ function Booklet({ kid, level, bookletNum, onComplete, onAbort }) {
                 {correctRef.trim()}
               </div>
               <div className="mt-8 sm:mt-12 space-y-4 sm:space-y-5">
+                {(() => { /* compute page-wide column flag */ })()}
                 {pgResult.problems.map((p, i) => {
                   const globalNum = (pgResult.pageInBooklet - 1) * PROBLEMS_PER_PAGE + i + 1;
                   const isCorrect = p.firstTryCorrect;
                   const ua = parseInt(correctingValues[i], 10);
                   const nowCorrect = !isCorrect && ua === p.answer;
-                  const useColumn = (p.a >= 10 || p.b >= 10) && (p.op === '+' || p.op === '−' || p.op === '×' || p.op === '÷');
+                  const useColumn = pageUsesColumnLayout(pgResult.problems) && (p.op === '+' || p.op === '−' || p.op === '×' || p.op === '÷');
                   if (useColumn) {
                     return (
                       <div key={i} className="flex items-start gap-2 sm:gap-4">
@@ -2250,7 +2325,7 @@ function Booklet({ kid, level, bookletNum, onComplete, onAbort }) {
               const isWord = hasWordProblems(level.id) && (i + 1) === PAGES_PER_BOOKLET;
               if (isWord) return mode === 'manual' ? !!data.wordDrawing : !!data.wordValue;
               const probs = generateProblemsForPage(level.id, bookletNum, i + 1);
-              return probs.every((_, qi) => mode === 'manual' ? data.drawings[qi] : (data.values[qi] && data.values[qi] !== ''));
+              return probs.every((_, qi) => isProblemFilled(data.values, data.drawings, qi));
             })();
             return (
               <button key={i} onClick={() => goToPage(i)}
@@ -2288,7 +2363,16 @@ function Booklet({ kid, level, bookletNum, onComplete, onAbort }) {
             values={currentPageData.values} drawings={currentPageData.drawings}
             onValueChange={onValueChange} onDrawingChange={onDrawingChange}
             onFocus={setFocusedIdx} focusedIdx={focusedIdx}
-            mode={mode} accent={c.ink} />
+            mode={mode} accent={c.ink}
+            eraserMode={eraserMode}
+            onToggleEraser={() => setEraserMode(e => !e)}
+            clearCounters={clearCounters}
+            onClearProblem={(i) => {
+              setCurrentPageField('values', i, '');
+              setCurrentPageField('drawings', i, null);
+              setClearCounters(prev => ({ ...prev, [i]: (prev[i] || 0) + 1 }));
+            }}
+          />
         )}
       </div>
 
