@@ -10,7 +10,7 @@ const KEY_PROGRESS = 'kumon:progress';
 
 const PROBLEMS_PER_PAGE = 10;
 const PAGES_PER_BOOKLET = 10; 
-const BOOKLETS_PER_LEVEL = 20;
+const BOOKLETS_PER_LEVEL = 30;
 
 const DEFAULT_CONFIG = {
   kids: [
@@ -21,6 +21,8 @@ const DEFAULT_CONFIG = {
   parentPin: '1234',
   parentEmail: '',
   deviceLockedToKid: null,
+  geminiApiKey: '',
+  geminiModel: 'gemini-2.5-flash',
 };
 
 async function loadConfig() {
@@ -95,12 +97,29 @@ const LEVELS = [
   { id: 'M3', cat: 'MUL', stage: 12, name: 'Tables ×6 à ×9',           desc: 'Drill une table à la fois',            kind: 'mul-drill-hard', op: '×', hasWordProblems: true },
   { id: 'M4', cat: 'MUL', stage: 13, name: 'Multiplication 2 chiffres', desc: '2 chiffres × 1 chiffre',              kind: 'mul-2x1', op: '×', hasWordProblems: true },
   { id: 'M5', cat: 'MUL', stage: 14, name: 'Multiplication 3 chiffres', desc: '3 chiffres × 1 chiffre',              kind: 'mul-3x1', op: '×', hasWordProblems: true },
+  { id: 'D1', cat: 'DIV', stage: 15, name: 'Division 1', desc: 'Division exacte (÷2, ÷5, ÷10)', kind: 'div-simple', op: '÷', hasWordProblems: false, divisors: [2, 5, 10] },
+  { id: 'D2', cat: 'DIV', stage: 16, name: 'Division 2', desc: 'Division exacte (÷3, ÷4)', kind: 'div-simple', op: '÷', hasWordProblems: false, divisors: [3, 4] },
+  { id: 'D3', cat: 'DIV', stage: 17, name: 'Division 3', desc: 'Division exacte (÷6, ÷7, ÷8, ÷9)', kind: 'div-simple', op: '÷', hasWordProblems: false, divisors: [6, 7, 8, 9] },
+  { id: 'D4', cat: 'DIV', stage: 18, name: 'Division 4',                  desc: 'Division avec reste',                           kind: 'div-remainder',  op: '÷', hasWordProblems: false, divisors: [2, 3, 4, 5, 6, 7, 8, 9] },
+  { id: 'D5', cat: 'DIV', stage: 19, name: 'Division posée 1',             desc: '2 chiffres ÷ 1 chiffre, sans reste',             kind: 'div-long-1',     op: '÷', hasWordProblems: false },
+  { id: 'D6', cat: 'DIV', stage: 20, name: 'Division posée 2',             desc: '3 chiffres ÷ 1 chiffre avec reste',              kind: 'div-long-2',     op: '÷', hasWordProblems: false },
+  { id: 'E1', cat: 'FRA', stage: 21, name: 'Fractions équivalentes',       desc: 'Trouver le numérateur manquant',                 kind: 'frac-equiv',     op: '=', hasWordProblems: false },
+  { id: 'E2', cat: 'FRA', stage: 22, name: 'Addition fractions (même dén.)',desc: 'Même dénominateur',                             kind: 'frac-add-same',  op: '+', hasWordProblems: false },
+  { id: 'E3', cat: 'FRA', stage: 23, name: 'Sous. fractions (même dén.)',  desc: 'Soustraction, même dénominateur',                kind: 'frac-sub-same',  op: '−', hasWordProblems: false },
+  { id: 'E4', cat: 'FRA', stage: 24, name: 'Fractions dén. différents',    desc: 'Addition et soustraction, dénominateurs différents', kind: 'frac-add-diff', op: '+', hasWordProblems: false },
+  { id: 'F1', cat: 'FRA', stage: 25, name: 'Multiplication fractions',     desc: '⅔ × ¾, simplification du résultat',             kind: 'frac-mul',       op: '×', hasWordProblems: false },
+  { id: 'F2', cat: 'FRA', stage: 26, name: 'Division fractions',           desc: '½ ÷ ¼, inversion du diviseur',                  kind: 'frac-div',       op: '÷', hasWordProblems: false },
+  { id: 'Dec1', cat: 'DEC', stage: 27, name: 'Décimaux + et −',            desc: 'Addition et soustraction de décimaux',           kind: 'dec-add-sub',    op: '.', hasWordProblems: false },
+  { id: 'Dec2', cat: 'DEC', stage: 28, name: 'Décimaux ×',                 desc: 'Multiplication de décimaux',                    kind: 'dec-mul',        op: '×', hasWordProblems: false },
 ];
 
 const CAT_INFO = {
   ADD: { name: 'Addition',       accent: '#3b82f6', soft: '#eff6ff', dot: '#2563eb' },
   SUB: { name: 'Soustraction',   accent: '#10b981', soft: '#ecfdf5', dot: '#059669' },
   MUL: { name: 'Multiplication', accent: '#8b5cf6', soft: '#f5f3ff', dot: '#7c3aed' },
+  DIV: { name: 'Division',       accent: '#7c3aed', soft: '#f5f3ff', dot: '#5b21b6' },
+  FRA: { name: 'Fractions',      accent: '#ec4899', soft: '#fdf2f8', dot: '#db2777' },
+  DEC: { name: 'Décimaux',       accent: '#f97316', soft: '#fff7ed', dot: '#ea580c' },
 };
 
 const KID_COLORS = {
@@ -207,6 +226,23 @@ function generateWordProblem(levelId, bookletNum) {
   return pickS(rng, templates)(a, b);
 }
 
+function mathGcd(a, b) { return b === 0 ? a : mathGcd(b, a % b); }
+function mathLcm(a, b) { return a * b / mathGcd(a, b); }
+function normalizeFracAnswer(s) {
+  s = String(s).trim();
+  if (s.includes('/')) {
+    const parts = s.split('/').map(Number);
+    if (parts.length !== 2 || isNaN(parts[0]) || isNaN(parts[1]) || parts[1] === 0) return s;
+    const g = mathGcd(Math.abs(parts[0]), Math.abs(parts[1]));
+    return parts[1] / g === 1 ? String(parts[0] / g) : `${parts[0] / g}/${parts[1] / g}`;
+  }
+  // Normalize decimals: "2.0" → "2", "1.50" → "1.5" (avoid mismatch for whole-number results)
+  if (!s.includes(' ') && s !== '' && !isNaN(parseFloat(s)) && isFinite(Number(s))) {
+    return String(parseFloat(s));
+  }
+  return s;
+}
+
 function generateProblemsForPage(levelId, bookletNum, pageNum) {
   const rng = seededRandom(hashSeed(levelId, bookletNum, pageNum));
   const lvl = LEVELS.find(l => l.id === levelId);
@@ -299,6 +335,130 @@ function generateProblemsForPage(levelId, bookletNum, pageNum) {
   if (kind === 'mul-3x1') {
     return Array.from({ length: PROBLEMS_PER_PAGE }, () => {
       const a = rndS(rng, 101, 999); const b = rndS(rng, 2, 9); return { a, b, op: '×', answer: a * b };
+    });
+  }
+  if (kind === 'div-simple') {
+    const divisors = lvl.divisors || [2, 5, 10];
+    return shuffleS(rng, Array.from({ length: PROBLEMS_PER_PAGE }, () => {
+      const d = pickS(rng, divisors);
+      const q = rndS(rng, 1, 10);
+      const a = d * q;
+      return { a, b: d, op: '÷', answer: q, remainder: 0 };
+    }));
+  }
+  if (kind === 'div-remainder') {
+    const divisors = lvl.divisors || [2, 3, 4, 5, 6, 7, 8, 9];
+    return shuffleS(rng, Array.from({ length: PROBLEMS_PER_PAGE }, () => {
+      const d = pickS(rng, divisors);
+      const a = rndS(rng, d, d * 10 + d - 1);
+      const q = Math.floor(a / d);
+      const r = a % d;
+      return { a, b: d, op: '÷', answer: q, remainder: r };
+    }));
+  }
+  if (kind === 'div-long-1') {
+    return Array.from({ length: PROBLEMS_PER_PAGE }, () => {
+      const divisor = rndS(rng, 2, 9);
+      const quotient = rndS(rng, 2, 9);
+      return { display: `${divisor * quotient} ÷ ${divisor}`, answer: String(quotient), op: '÷' };
+    });
+  }
+  if (kind === 'div-long-2') {
+    return Array.from({ length: PROBLEMS_PER_PAGE }, () => {
+      const divisor = rndS(rng, 2, 9);
+      const quotient = rndS(rng, 11, 99);
+      const remainder = rndS(rng, 0, divisor - 1);
+      const dividend = divisor * quotient + remainder;
+      return {
+        display: `${dividend} ÷ ${divisor}`,
+        answer: remainder > 0 ? `${quotient} R${remainder}` : String(quotient),
+        op: '÷'
+      };
+    });
+  }
+  if (kind === 'frac-equiv') {
+    const bases = [[1,2],[1,3],[2,3],[1,4],[3,4],[1,5],[2,5],[1,6],[3,5],[2,7]];
+    return Array.from({ length: PROBLEMS_PER_PAGE }, () => {
+      const [bn, bd] = bases[rndS(rng, 0, bases.length - 1)];
+      const mult = rndS(rng, 2, 5);
+      return { display: `${bn}/${bd} = ?/${bd * mult}`, answer: String(bn * mult), op: '=' };
+    });
+  }
+  if (kind === 'frac-add-same') {
+    return Array.from({ length: PROBLEMS_PER_PAGE }, () => {
+      const den = [2, 3, 4, 5, 6, 8][rndS(rng, 0, 5)];
+      const n1 = rndS(rng, 1, den - 1);
+      const n2 = rndS(rng, 1, Math.max(1, den - n1));
+      const raw = n1 + n2;
+      const g = mathGcd(raw, den);
+      const an = raw / g, ad = den / g;
+      return { display: `${n1}/${den} + ${n2}/${den}`, answer: ad === 1 ? String(an) : `${an}/${ad}`, op: '+', isFrac: true };
+    });
+  }
+  if (kind === 'frac-sub-same') {
+    return Array.from({ length: PROBLEMS_PER_PAGE }, () => {
+      const den = [2, 3, 4, 5, 6, 8][rndS(rng, 0, 5)];
+      const n1 = rndS(rng, 2, den);
+      const n2 = rndS(rng, 1, n1 - 1);
+      const raw = n1 - n2;
+      const g = mathGcd(raw, den);
+      const an = raw / g, ad = den / g;
+      return { display: `${n1}/${den} − ${n2}/${den}`, answer: ad === 1 ? String(an) : `${an}/${ad}`, op: '−', isFrac: true };
+    });
+  }
+  if (kind === 'frac-add-diff') {
+    const pairs = [[1,2,1,3],[1,3,1,4],[1,2,1,4],[1,4,1,5],[1,2,1,5],[1,3,1,6],[1,2,1,6],[1,4,3,8]];
+    return Array.from({ length: PROBLEMS_PER_PAGE }, () => {
+      const [n1,d1,n2,d2] = pairs[rndS(rng, 0, pairs.length - 1)];
+      const isAdd = rndS(rng, 0, 1) === 0;
+      const lcd = mathLcm(d1, d2);
+      const v1 = n1 * (lcd / d1), v2 = n2 * (lcd / d2);
+      const rawNum = isAdd ? v1 + v2 : Math.abs(v1 - v2);
+      if (rawNum === 0) return { display: `${n1}/${d1} ${isAdd ? '+' : '−'} ${n2}/${d2}`, answer: isAdd ? normalizeFracAnswer(`${v1 + v2}/${lcd}`) : '0', op: isAdd ? '+' : '−', isFrac: true };
+      const g = mathGcd(rawNum, lcd);
+      const an = rawNum / g, ad = lcd / g;
+      const left = isAdd ? `${n1}/${d1}` : (v1 >= v2 ? `${n1}/${d1}` : `${n2}/${d2}`);
+      const right = isAdd ? `${n2}/${d2}` : (v1 >= v2 ? `${n2}/${d2}` : `${n1}/${d1}`);
+      return { display: `${left} ${isAdd ? '+' : '−'} ${right}`, answer: ad === 1 ? String(an) : `${an}/${ad}`, op: isAdd ? '+' : '−', isFrac: true };
+    });
+  }
+  if (kind === 'frac-mul') {
+    const pairs = [[1,2,1,3],[1,2,2,3],[1,3,3,4],[2,3,3,4],[1,4,2,3],[1,2,3,4],[2,5,1,2],[1,3,2,5]];
+    return Array.from({ length: PROBLEMS_PER_PAGE }, () => {
+      const [n1,d1,n2,d2] = pairs[rndS(rng, 0, pairs.length - 1)];
+      const rawN = n1 * n2, rawD = d1 * d2;
+      const g = mathGcd(rawN, rawD);
+      const an = rawN / g, ad = rawD / g;
+      return { display: `${n1}/${d1} × ${n2}/${d2}`, answer: ad === 1 ? String(an) : `${an}/${ad}`, op: '×', isFrac: true };
+    });
+  }
+  if (kind === 'frac-div') {
+    const pairs = [[1,2,1,4],[2,3,1,3],[3,4,1,2],[1,2,1,3],[1,4,1,2],[3,5,3,10],[1,3,1,6],[2,3,4,9]];
+    return Array.from({ length: PROBLEMS_PER_PAGE }, () => {
+      const [n1,d1,n2,d2] = pairs[rndS(rng, 0, pairs.length - 1)];
+      const rawN = n1 * d2, rawD = d1 * n2;
+      const g = mathGcd(rawN, rawD);
+      const an = rawN / g, ad = rawD / g;
+      return { display: `${n1}/${d1} ÷ ${n2}/${d2}`, answer: ad === 1 ? String(an) : `${an}/${ad}`, op: '÷', isFrac: true };
+    });
+  }
+  if (kind === 'dec-add-sub') {
+    return Array.from({ length: PROBLEMS_PER_PAGE }, () => {
+      const a = rndS(rng, 10, 99) / 10;
+      const b = rndS(rng, 10, 99) / 10;
+      const isAdd = rndS(rng, 0, 1) === 0;
+      const left = isAdd ? a : Math.max(a, b);
+      const right = isAdd ? b : Math.min(a, b);
+      const result = Math.round((isAdd ? a + b : Math.abs(a - b)) * 10) / 10;
+      return { display: `${left} ${isAdd ? '+' : '−'} ${right}`, answer: String(result), op: isAdd ? '+' : '−' };
+    });
+  }
+  if (kind === 'dec-mul') {
+    return Array.from({ length: PROBLEMS_PER_PAGE }, () => {
+      const a = rndS(rng, 2, 9);
+      const b = rndS(rng, 10, 50) / 10;
+      const result = Math.round(a * b * 10) / 10;
+      return { display: `${b} × ${a}`, answer: String(result), op: '×' };
     });
   }
   return [];
@@ -573,7 +733,7 @@ function HandwritingCanvas({ onChange, resetSignal }) {
   );
 }
 
-function KumonWorksheetPage({ pageRef: ref, problems, startIndex, values, drawings, onValueChange, onDrawingChange, onFocus, focusedIdx, mode, accent, phase, errors }) {
+function KumonWorksheetPage({ pageRef: ref, problems, startIndex, values, drawings, onValueChange, onDrawingChange, onFocus, focusedIdx, mode, accent, phase, errors, celebrate }) {
   return (
     <div className="bg-white rounded-[2rem] shadow-xl shadow-slate-200/50 p-6 sm:p-10 max-w-2xl mx-auto border border-slate-100" style={{ minHeight: 500 }}>
       <div className="flex justify-between items-center mb-8">
@@ -588,15 +748,17 @@ function KumonWorksheetPage({ pageRef: ref, problems, startIndex, values, drawin
           const isAdd = p.op === '+';
           const isSub = p.op === '−';
           const isMul = p.op === '×';
+          const isDiv = p.op === '÷';
           const useColumn = (isAdd && p.b >= 10) || (isSub && p.b >= 10) || (isMul && p.a >= 10);
-          
+          const isCelebrating = celebrate === i;
+
           const isError = phase === 'self-correction' && errors.includes(i);
           const isCorrect = phase === 'self-correction' && !errors.includes(i);
 
           if (useColumn) {
             const expectedAnswer = p.op === '+' ? p.a + p.b : p.op === '−' ? p.a - p.b : p.op === '×' ? p.a * p.b : 0;
             return (
-              <div key={i} className="flex items-start gap-3 sm:gap-6 group">
+              <div key={i} className={`flex items-start gap-3 sm:gap-6 group transition-transform duration-150 ${isCelebrating ? 'scale-110' : 'scale-100'}`}>
                 <div className="text-slate-300 font-bold text-sm sm:text-base tabular-nums w-8 sm:w-10 text-right shrink-0 pt-3 opacity-50 group-hover:opacity-100 transition-opacity">
                   {globalNum}.
                 </div>
@@ -607,16 +769,61 @@ function KumonWorksheetPage({ pageRef: ref, problems, startIndex, values, drawin
             );
           }
 
+          if (isDiv && !p.display) {
+            const hasRemainder = p.remainder !== undefined && p.remainder > 0;
+            return (
+              <div key={i} className={`flex items-center gap-3 sm:gap-6 group transition-transform duration-150 ${isCelebrating ? 'scale-110' : 'scale-100'}`}>
+                <div className="text-slate-300 font-bold text-sm sm:text-base tabular-nums w-8 sm:w-10 text-right shrink-0 opacity-50 group-hover:opacity-100 transition-opacity">
+                  {globalNum}.
+                </div>
+                <div className="text-3xl sm:text-4xl font-bold text-slate-800 tabular-nums flex items-center gap-3 sm:gap-4 flex-1 flex-wrap">
+                  <span className="text-right w-12 sm:w-16">{p.a}</span>
+                  <span className="text-slate-400">{p.op}</span>
+                  <span className="text-right w-12 sm:w-16">{p.b}</span>
+                  <span className="text-slate-300">=</span>
+                  {mode === 'manual' ? (
+                    <div className="flex-1 max-w-[200px] h-16 sm:h-20 relative">
+                      <HandwritingCanvas onChange={(d) => onDrawingChange(i, d)} resetSignal={`${ref}-${i}`} />
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        autoComplete="off"
+                        autoCorrect="off"
+                        spellCheck="false"
+                        value={values[i] || ''}
+                        onChange={e => onValueChange(i, e.target.value)}
+                        onFocus={() => onFocus(i)}
+                        disabled={isCorrect}
+                        placeholder={isFocused && !isCorrect ? '?' : ''}
+                        className={`text-3xl sm:text-4xl outline-none tabular-nums font-bold w-24 sm:w-32 rounded-2xl text-center transition-all ${isCorrect ? 'bg-green-50 text-green-700 opacity-90' : 'bg-slate-50 focus:bg-white focus:shadow-md'}`}
+                        style={{
+                          border: `3px solid ${isError ? '#ef4444' : isCorrect ? '#10b981' : isFocused ? accent : 'transparent'}`,
+                          color: isError ? '#ef4444' : isCorrect ? '#10b981' : (isFocused ? accent : '#1e293b'),
+                          padding: '8px 0'
+                        }}
+                      />
+                      {hasRemainder && isCorrect && (
+                        <span className="text-base font-bold text-slate-500">r.{p.remainder}</span>
+                      )}
+                      {hasRemainder && !isCorrect && (
+                        <span className="text-xs text-slate-400 font-medium">reste ?</span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          }
+
           return (
-            <div key={i} className="flex items-center gap-3 sm:gap-6 group">
+            <div key={i} className={`flex items-center gap-3 sm:gap-6 group transition-transform duration-150 ${isCelebrating ? 'scale-110' : 'scale-100'}`}>
               <div className="text-slate-300 font-bold text-sm sm:text-base tabular-nums w-8 sm:w-10 text-right shrink-0 opacity-50 group-hover:opacity-100 transition-opacity">
                 {globalNum}.
               </div>
               <div className="text-3xl sm:text-4xl font-bold text-slate-800 tabular-nums flex items-center gap-3 sm:gap-4 flex-1">
-                <span className="text-right w-12 sm:w-16">{p.a}</span>
-                <span className="text-slate-400">{p.op}</span>
-                <span className="text-right w-12 sm:w-16">{p.b}</span>
-                <span className="text-slate-300">=</span>
+                <ProblemDisplay p={p} />
                 {mode === 'manual' ? (
                   <div className="flex-1 max-w-[200px] h-16 sm:h-20 relative">
                     <HandwritingCanvas onChange={(d) => onDrawingChange(i, d)} resetSignal={`${ref}-${i}`} />
@@ -781,6 +988,9 @@ function NumPad({ onDigit, onClear, onNext }) {
       <button onClick={onClear} className={btn + " text-xl"}>⌫</button>
       <button onClick={() => onDigit('0')} className={btn}>0</button>
       <button onClick={onNext} className="h-14 sm:h-16 rounded-2xl text-xl font-bold bg-slate-800 text-white border-b-4 border-slate-900 active:border-b-0 active:translate-y-1 transition-all">↵</button>
+      <button onClick={() => onDigit('.')} className={btn + " text-lg text-slate-500"}>.</button>
+      <button onClick={() => onDigit('/')} className={btn + " text-lg text-slate-500"}>⁄</button>
+      <button onClick={() => onDigit(' R')} className={btn + " text-sm text-slate-500"}>R</button>
     </div>
   );
 }
@@ -962,10 +1172,10 @@ function Booklet({ kid, level, bookletNum, onComplete, onAbort }) {
   const [pageIdx, setPageIdx] = useState(0);
   const [pageData, setPageData] = useState({});
   const [focusedIdx, setFocusedIdx] = useState(0);
-  
-  // Phase d'auto-correction pour que l'enfant vérifie lui-même
-  const [phase, setPhase] = useState('doing'); // 'doing', 'self-correction'
-  const [errorsMap, setErrorsMap] = useState({}); 
+  const [celebrate, setCelebrate] = useState(null);
+
+  const [phase, setPhase] = useState('doing');
+  const [errorsMap, setErrorsMap] = useState({});
 
   const [firstTryDurationSec, setFirstTryDurationSec] = useState(0);
   const [correctionDurationSec, setCorrectionDurationSec] = useState(0);
@@ -996,7 +1206,19 @@ function Booklet({ kid, level, bookletNum, onComplete, onAbort }) {
   const setCurrentPageField = (field, key, val) => {
     setPageData(prev => {
       const cur = prev[pageIdx] || { values: {}, drawings: {}, wordValue: '', wordDrawing: null };
-      if (field === 'values') return { ...prev, [pageIdx]: { ...cur, values: { ...cur.values, [key]: val } } };
+      if (field === 'values') {
+        const newState = { ...prev, [pageIdx]: { ...cur, values: { ...cur.values, [key]: val } } };
+        const prob = problems[key];
+        if (prob && val !== '') {
+          const typedAnswer = normalizeFracAnswer(String(val).trim());
+          const expectedAnswer = normalizeFracAnswer(String(prob.answer));
+          if (typedAnswer !== '' && typedAnswer === expectedAnswer) {
+            setCelebrate(key);
+            setTimeout(() => setCelebrate(null), 600);
+          }
+        }
+        return newState;
+      }
       if (field === 'drawings') return { ...prev, [pageIdx]: { ...cur, drawings: { ...cur.drawings, [key]: val } } };
       if (field === 'wordValue') return { ...prev, [pageIdx]: { ...cur, wordValue: val } };
       if (field === 'wordDrawing') return { ...prev, [pageIdx]: { ...cur, wordDrawing: val } };
@@ -1007,7 +1229,7 @@ function Booklet({ kid, level, bookletNum, onComplete, onAbort }) {
   const isCurrentPageFilled = () => {
     if (isWordPage) return mode === 'manual' ? !!currentPageData.wordDrawing : !!currentPageData.wordValue;
     return problems.every((_, i) => {
-      if (phase === 'self-correction' && !currentErrors.includes(i)) return true; // Already correct
+      if (phase === 'self-correction' && !currentErrors.includes(i)) return true;
       return mode === 'manual' ? currentPageData.drawings[i] : (currentPageData.values[i] && currentPageData.values[i] !== '');
     });
   };
@@ -1035,7 +1257,6 @@ function Booklet({ kid, level, bookletNum, onComplete, onAbort }) {
       return;
     }
 
-    // Auto-évaluation pour Clavier ou Pencil
     let hasErrors = false;
     const newErrors = {};
     const finalPages = [];
@@ -1056,9 +1277,9 @@ function Booklet({ kid, level, bookletNum, onComplete, onAbort }) {
         const probs = generateProblemsForPage(level.id, bookletNum, p + 1);
         const probResults = [];
         probs.forEach((pr, i) => {
-          const uaStr = String(data.values[i] || '').replace(/\D/g, '');
-          const ua = uaStr === '' ? null : parseInt(uaStr, 10);
-          const isCorrect = ua === pr.answer;
+          const uaStr = String(data.values[i] || '').trim();
+          const ua = uaStr === '' ? null : uaStr;
+          const isCorrect = ua !== null && normalizeFracAnswer(ua) === normalizeFracAnswer(String(pr.answer));
           if (!isCorrect) { hasErrors = true; newErrors[p].push(i); }
           probResults.push({ ...pr, firstTryAnswer: ua, firstTryCorrect: phase === 'doing' ? isCorrect : undefined, finalCorrect: true });
         });
@@ -1071,7 +1292,6 @@ function Booklet({ kid, level, bookletNum, onComplete, onAbort }) {
       setPhase('self-correction');
       setShakeErr(true);
       setTimeout(() => setShakeErr(false), 500);
-      
       const firstErrPage = Object.keys(newErrors).find(p => newErrors[p].length > 0);
       if (firstErrPage) {
         setPageIdx(Number(firstErrPage));
@@ -1108,7 +1328,7 @@ function Booklet({ kid, level, bookletNum, onComplete, onAbort }) {
         {isWordPage ? (
           <WordProblemPage pageRef={ref} wordProblem={wordProblem} value={currentPageData.wordValue} drawing={currentPageData.wordDrawing} onValueChange={v => setCurrentPageField('wordValue', null, v)} onDrawingChange={d => setCurrentPageField('wordDrawing', null, d)} onFocus={() => setFocusedIdx(0)} isFocused={true} mode={mode} accent={phase === 'self-correction' ? '#f59e0b' : c.ink} phase={phase} errors={currentErrors} />
         ) : (
-          <KumonWorksheetPage pageRef={ref} problems={problems} startIndex={startIndex} values={currentPageData.values} drawings={currentPageData.drawings} onValueChange={(i, v) => setCurrentPageField('values', i, v)} onDrawingChange={(i, d) => setCurrentPageField('drawings', i, d)} onFocus={setFocusedIdx} focusedIdx={focusedIdx} mode={mode} accent={phase === 'self-correction' ? '#f59e0b' : c.ink} phase={phase} errors={currentErrors} />
+          <KumonWorksheetPage pageRef={ref} problems={problems} startIndex={startIndex} values={currentPageData.values} drawings={currentPageData.drawings} onValueChange={(i, v) => setCurrentPageField('values', i, v)} onDrawingChange={(i, d) => setCurrentPageField('drawings', i, d)} onFocus={setFocusedIdx} focusedIdx={focusedIdx} mode={mode} accent={phase === 'self-correction' ? '#f59e0b' : c.ink} phase={phase} errors={currentErrors} celebrate={celebrate} />
         )}
       </div>
 
@@ -1191,10 +1411,361 @@ function ParentDashboard({ config, sessions, progress, manualUnlocks, onUpdateCo
                   <div><div className="font-bold text-slate-800">{kid.name}</div><div className="text-sm text-slate-500">{kid.age} ans - NIP: {kid.pin} - Mode: {kid.inputMode}</div></div>
                </div>
              ))}
+             <div className="mt-8 border-t border-slate-200 pt-8">
+               <h3 className="text-lg font-bold text-slate-800 mb-2">Assistant Kaizo (IA)</h3>
+               <p className="text-sm text-slate-500 mb-4">Configure la clé API Gemini pour activer l'assistant Kaizo. Obtiens une clé sur <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer" className="text-blue-600 underline">Google AI Studio</a>.</p>
+               <div className="flex flex-col gap-3">
+                 <label className="text-sm font-bold text-slate-700">Clé API Gemini</label>
+                 <input
+                   type="password"
+                   value={config.geminiApiKey || ''}
+                   onChange={e => onUpdateConfig({ ...config, geminiApiKey: e.target.value })}
+                   placeholder="Colle ta clé API ici..."
+                   className="border border-slate-300 rounded-xl px-4 py-3 text-sm font-mono focus:outline-none focus:border-blue-500"
+                 />
+                 <label className="text-sm font-bold text-slate-700">Modèle Gemini</label>
+                 <select
+                   value={config.geminiModel || 'gemini-2.5-flash'}
+                   onChange={e => onUpdateConfig({ ...config, geminiModel: e.target.value })}
+                   className="border border-slate-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-500 bg-white">
+                   <option value="gemini-2.5-flash">gemini-2.5-flash (recommandé)</option>
+                   <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+                   <option value="gemini-1.5-flash">gemini-1.5-flash</option>
+                 </select>
+               </div>
+             </div>
           </div>
         )}
       </div>
     </AppBackground>
+  );
+}
+
+// ============================================================
+// SCRATCHPAD
+// ============================================================
+function FracDisplay({ num, den }) {
+  return (
+    <span className="inline-flex flex-col items-center leading-none mx-1 align-middle">
+      <span className="text-base font-bold border-b-2 border-current px-0.5 leading-tight">{num}</span>
+      <span className="text-base font-bold px-0.5 leading-tight">{den}</span>
+    </span>
+  );
+}
+
+function ProblemDisplay({ p }) {
+  if (!p.display) {
+    return (
+      <>
+        <span className="text-right w-12 sm:w-16">{p.a}</span>
+        <span className="text-slate-400">{p.op}</span>
+        <span className="text-right w-12 sm:w-16">{p.b}</span>
+        <span className="text-slate-300 mx-1">=</span>
+      </>
+    );
+  }
+  const parts = p.display.split(/(\?\/\d+|\d+\/\d+)/);
+  return (
+    <>
+      {parts.map((part, idx) => {
+        const fm = part.match(/^(\?|\d+)\/(\d+)$/);
+        if (fm) return <FracDisplay key={idx} num={fm[1]} den={fm[2]} />;
+        return <span key={idx} className="mx-0.5 text-slate-600 font-bold">{part}</span>;
+      })}
+      {!p.display.includes('=') && <span className="text-slate-300 mx-1">=</span>}
+    </>
+  );
+}
+
+function Scratchpad({ onClose }) {
+  const canvasRef = useRef(null);
+  const [drawing, setDrawing] = useState(false);
+  const [color, setColor] = useState('#2563EB');
+  const [tool, setTool] = useState('pencil');
+  const [lineWidth, setLineWidth] = useState(3);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const draw = () => {
+      const ctx = canvas.getContext('2d');
+      const { width, height } = canvas.parentNode.getBoundingClientRect();
+      canvas.width = width;
+      canvas.height = height;
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(0, 0, width, height);
+      ctx.strokeStyle = '#DBEAFE';
+      ctx.lineWidth = 1;
+      for (let x = 0; x < width; x += 30) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+      }
+      for (let y = 0; y < height; y += 30) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+      }
+    };
+    draw();
+    window.addEventListener('resize', draw);
+    return () => window.removeEventListener('resize', draw);
+  }, []);
+
+  const getXY = (e) => {
+    const r = canvasRef.current.getBoundingClientRect();
+    const src = e.touches ? e.touches[0] : e;
+    return { x: src.clientX - r.left, y: src.clientY - r.top };
+  };
+
+  const start = (e) => {
+    const ctx = canvasRef.current.getContext('2d');
+    const { x, y } = getXY(e);
+    ctx.beginPath(); ctx.moveTo(x, y);
+    ctx.lineWidth = tool === 'eraser' ? 20 : lineWidth;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = tool === 'eraser' ? '#FFFFFF' : color;
+    setDrawing(true);
+    e.preventDefault();
+  };
+
+  const move = (e) => {
+    if (!drawing) return;
+    const { x, y } = getXY(e);
+    const ctx = canvasRef.current.getContext('2d');
+    ctx.lineTo(x, y); ctx.stroke();
+    e.preventDefault();
+  };
+
+  const stop = () => setDrawing(false);
+
+  const reset = () => {
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = '#DBEAFE'; ctx.lineWidth = 1;
+    for (let x = 0; x < canvas.width; x += 30) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
+    }
+    for (let y = 0; y < canvas.height; y += 30) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
+    }
+  };
+
+  const COLORS = [
+    ['#2563EB', '🔵'], ['#16A34A', '🟢'], ['#DC2626', '🔴'],
+    ['#D97706', '🟡'], ['#7C3AED', '🟣'], ['#0E7490', '🩵'],
+  ];
+
+  return (
+    <div className="flex flex-col h-full bg-white">
+      <div className="flex items-center justify-between px-3 py-2 bg-blue-600 text-white shrink-0">
+        <span className="font-bold text-sm">✏️ Mon Ardoise</span>
+        <button onClick={onClose} className="text-white text-lg font-bold">✕</button>
+      </div>
+      <div className="flex items-center gap-1 px-2 py-1.5 bg-blue-50 border-b border-blue-100 flex-wrap shrink-0">
+        {COLORS.map(([c, emoji]) => (
+          <button key={c} onClick={() => { setTool('pencil'); setColor(c); }}
+            className="w-8 h-8 rounded-full border-2 flex items-center justify-center text-sm transition-all"
+            style={{ background: c, borderColor: (tool === 'pencil' && color === c) ? '#1D4ED8' : 'transparent' }}>
+            {(tool === 'pencil' && color === c) ? '✓' : ''}
+          </button>
+        ))}
+        <button onClick={() => setTool('eraser')}
+          className={`px-2 py-1 rounded-lg text-xs font-bold border ${tool === 'eraser' ? 'bg-orange-500 text-white border-orange-600' : 'bg-white text-gray-600 border-gray-300'}`}>
+          🧽
+        </button>
+        <select value={lineWidth} onChange={e => setLineWidth(+e.target.value)}
+          className="text-xs border border-gray-200 rounded px-1 py-0.5 bg-white">
+          <option value={2}>Fine</option>
+          <option value={4}>Moyenne</option>
+          <option value={8}>Épaisse</option>
+        </select>
+        <button onClick={reset}
+          className="ml-auto px-2 py-1 bg-red-500 hover:bg-red-600 text-white text-xs font-bold rounded-lg">
+          Effacer tout
+        </button>
+      </div>
+      <div className="flex-1 relative overflow-hidden">
+        <canvas ref={canvasRef}
+          onMouseDown={start} onMouseMove={move} onMouseUp={stop} onMouseLeave={stop}
+          onTouchStart={start} onTouchMove={move} onTouchEnd={stop}
+          className="absolute inset-0 cursor-crosshair touch-none w-full h-full" />
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// KAIZO ASSISTANT
+// ============================================================
+const SYSTEM_PROMPT_KAIZO = `Tu es "Kaizo", un assistant mathématiques bienveillant pour enfants qui font la méthode Kumon.
+Règles ABSOLUES :
+1. NE DONNE JAMAIS LA RÉPONSE DIRECTEMENT. Jamais le chiffre final.
+2. Guide l'enfant par étapes simples avec des questions (Socrate).
+3. Adapte ton langage : 5-12 ans, phrases courtes, vocabulaire simple.
+4. Utilise des exemples concrets de la vie quotidienne (bonbons, billes, etc.).
+5. Encourage chaleureusement : "Bravo !", "Tu es sur la bonne voie !", "Continue !".
+6. Pour l'addition : parle de "mettre ensemble", "regrouper".
+7. Pour la soustraction : parle de "enlever", "combien reste-t-il".
+8. Pour la multiplication : parle de "groupes égaux", "fois".
+9. Sois toujours positif, jamais condescendant.
+10. Réponds toujours en français.`;
+
+function KaizoAssistant({ activeKid, currentLevel, config, onClose }) {
+  const [query, setQuery] = useState('');
+  const [history, setHistory] = useState([{
+    role: 'assistant',
+    text: `Bonjour ${activeKid?.name || 'toi'} ! 😊 Je suis Kaizo, ton ami mathématique ! Tu travailles en niveau ${currentLevel || 'Kumon'} ? Pose-moi une question, je vais t'aider à trouver la réponse par toi-même !`
+  }]);
+  const [loading, setLoading] = useState(false);
+  const chatEndRef = useRef(null);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [history, loading]);
+
+  const askKaizo = async (prompt) => {
+    const text = prompt || query.trim();
+    if (!text) return;
+    setHistory(h => [...h, { role: 'user', text }]);
+    setQuery('');
+    setLoading(true);
+
+    if (!config.geminiApiKey) {
+      setHistory(h => [...h, { role: 'assistant', text: '⚠️ Demande à un parent de configurer la clé API Gemini dans le tableau de bord parent pour activer mon aide !' }]);
+      setLoading(false);
+      return;
+    }
+
+    const model = config.geminiModel || 'gemini-2.5-flash';
+    const kidCtx = activeKid ? `Élève: ${activeKid.name}, ${activeKid.age || 8} ans.` : '';
+    const levelCtx = currentLevel ? `Niveau Kumon: ${currentLevel}.` : '';
+    const fullPrompt = `${kidCtx} ${levelCtx}\nQuestion de l'élève: "${text}"`;
+
+    let delay = 1000;
+    try {
+      for (let i = 0; i < 4; i++) {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.geminiApiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: fullPrompt }] }],
+              systemInstruction: { parts: [{ text: SYSTEM_PROMPT_KAIZO }] }
+            })
+          }
+        );
+        if (res.status === 429) { await new Promise(r => setTimeout(r, delay)); delay *= 2; continue; }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const reply = data.candidates?.[0]?.content?.parts?.[0]?.text || "Je n'ai pas compris, peux-tu reformuler ?";
+        setHistory(h => [...h, { role: 'assistant', text: reply }]);
+        break;
+      }
+    } catch (e) {
+      setHistory(h => [...h, { role: 'assistant', text: "Oups ! J'ai eu un petit problème. Réessaie dans un moment !" }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const QUICK_ACTIONS = [
+    { label: '💡 Explique-moi', prompt: `Explique-moi comment faire ce type d'exercice en niveau ${currentLevel} étape par étape` },
+    { label: '🎯 Donne un indice', prompt: 'Donne-moi un indice pour démarrer sans me donner la réponse' },
+    { label: '📝 Exemple similaire', prompt: 'Montre-moi un exemple similaire avec de petits nombres' },
+    { label: '🌟 Encouragement', prompt: "Encourage-moi, j'ai du mal !" },
+  ];
+
+  return (
+    <div className="flex flex-col h-full bg-gradient-to-b from-sky-50 to-white">
+      <div className="flex items-center justify-between px-3 py-2 bg-sky-600 text-white shrink-0">
+        <div className="flex items-center gap-2">
+          <span className="text-xl">🤖</span>
+          <div>
+            <div className="font-bold text-sm">Kaizo</div>
+            <div className="text-xs text-sky-200">Ton guide mathématique</div>
+          </div>
+        </div>
+        <button onClick={onClose} className="text-white text-lg font-bold">✕</button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-3 space-y-3">
+        {history.map((msg, i) => (
+          <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`max-w-[85%] rounded-2xl p-3 shadow-sm text-sm leading-relaxed ${
+              msg.role === 'user'
+                ? 'bg-sky-600 text-white rounded-br-none'
+                : 'bg-white text-gray-800 border border-sky-100 rounded-bl-none'
+            }`}>
+              {msg.role === 'assistant' && <span className="text-xs font-bold text-sky-600 block mb-1">🤖 KAIZO</span>}
+              <p style={{ whiteSpace: 'pre-wrap' }}>{msg.text}</p>
+            </div>
+          </div>
+        ))}
+        {loading && (
+          <div className="flex justify-start">
+            <div className="bg-white rounded-2xl p-3 border border-sky-100 shadow-sm flex items-center gap-1">
+              <span className="w-2 h-2 bg-sky-500 rounded-full animate-bounce"></span>
+              <span className="w-2 h-2 bg-sky-500 rounded-full animate-bounce" style={{animationDelay:'0.2s'}}></span>
+              <span className="w-2 h-2 bg-sky-500 rounded-full animate-bounce" style={{animationDelay:'0.4s'}}></span>
+            </div>
+          </div>
+        )}
+        <div ref={chatEndRef} />
+      </div>
+
+      <div className="px-2 py-1.5 border-t border-sky-100 bg-white grid grid-cols-2 gap-1.5 shrink-0">
+        {QUICK_ACTIONS.map(qa => (
+          <button key={qa.label} onClick={() => askKaizo(qa.prompt)}
+            className="p-2 bg-sky-50 hover:bg-sky-100 text-sky-800 rounded-xl text-xs font-semibold border border-sky-200 text-left transition-colors">
+            {qa.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="p-2 border-t border-sky-200 bg-white flex gap-2 shrink-0">
+        <input type="text" value={query} onChange={e => setQuery(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && askKaizo()}
+          placeholder="Pose une question à Kaizo..."
+          className="flex-1 bg-sky-50 border border-sky-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-sky-500" />
+        <button onClick={() => askKaizo()}
+          className="px-3 py-2 bg-sky-600 hover:bg-sky-700 text-white rounded-xl font-bold text-sm transition-colors">
+          ➤
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// TOOL PANEL
+// ============================================================
+function ToolPanel({ activeKid, currentLevel, config }) {
+  const [open, setOpen] = useState(null);
+
+  return (
+    <>
+      <div className="fixed bottom-4 right-4 flex flex-col gap-2 z-50">
+        <button onClick={() => setOpen(open === 'ardoise' ? null : 'ardoise')}
+          className={`w-12 h-12 rounded-full shadow-lg flex items-center justify-center text-xl transition-all ${open === 'ardoise' ? 'bg-blue-600 text-white' : 'bg-white text-blue-600 border-2 border-blue-600'}`}
+          title="Ardoise">
+          ✏️
+        </button>
+        <button onClick={() => setOpen(open === 'kaizo' ? null : 'kaizo')}
+          className={`w-12 h-12 rounded-full shadow-lg flex items-center justify-center text-xl transition-all ${open === 'kaizo' ? 'bg-sky-600 text-white' : 'bg-white text-sky-600 border-2 border-sky-600'}`}
+          title="Aide Kaizo">
+          🤖
+        </button>
+      </div>
+
+      {open && (
+        <div className="fixed bottom-0 left-0 right-0 h-[55vh] bg-white shadow-2xl rounded-t-2xl z-40 border-t border-gray-200 flex flex-col overflow-hidden">
+          {open === 'ardoise' && <Scratchpad onClose={() => setOpen(null)} />}
+          {open === 'kaizo' && <KaizoAssistant activeKid={activeKid} currentLevel={currentLevel} config={config} onClose={() => setOpen(null)} />}
+        </div>
+      )}
+      {open && <div className="fixed inset-0 z-30" onClick={() => setOpen(null)} />}
+    </>
   );
 }
 
@@ -1236,6 +1807,11 @@ export default function App() {
     setScreen('levelpath');
   };
 
+  const handleUpdateConfig = async (newConfig) => {
+    setConfig(newConfig);
+    await saveConfig(newConfig);
+  };
+
   if (loading) return <div className="min-h-screen flex items-center justify-center bg-slate-50"><div className="font-bold text-slate-400">Chargement...</div></div>;
 
   return (
@@ -1246,10 +1822,15 @@ export default function App() {
       {screen === 'home' && <KidPicker config={config} sessions={sessions} progress={progress} manualUnlocks={manualUnlocks} lockedKidId={urlKidId || config.deviceLockedToKid} onPickKid={k => { setActiveKid(k); setScreen('kidpin'); }} onPickParent={() => setScreen('parentgate')} />}
       {screen === 'kidpin' && activeKid && <KidPinGate kid={activeKid} onSuccess={() => setScreen('levelpath')} onBack={() => { setActiveKid(null); setScreen('home'); }} />}
       {screen === 'levelpath' && activeKid && <LevelPath kid={activeKid} progress={progress} manualUnlocks={manualUnlocks} sessions={sessions} onPickBooklet={(lvl, num) => { setActiveLevel(lvl); setActiveBooklet(num); setScreen('booklet'); }} onBack={() => setScreen('home')} />}
-      {screen === 'booklet' && activeKid && activeLevel && <Booklet kid={activeKid} level={activeLevel} bookletNum={activeBooklet} onComplete={handleComplete} onAbort={() => setScreen('levelpath')} />}
+      {screen === 'booklet' && activeKid && activeLevel && (
+        <>
+          <Booklet kid={activeKid} level={activeLevel} bookletNum={activeBooklet} onComplete={handleComplete} onAbort={() => setScreen('levelpath')} />
+          <ToolPanel activeKid={activeKid} currentLevel={activeLevel?.id} config={config} />
+        </>
+      )}
       {screen === 'results' && lastSession && activeKid && <Results session={lastSession} kid={activeKid} parentEmail={config.parentEmail} justUnlockedNext={justUnlockedNext} onRetry={() => setScreen('booklet')} onContinue={handleContinue} onDone={() => setScreen('home')} />}
       {screen === 'parentgate' && <ParentGate pin={config.parentPin} onSuccess={() => setScreen('parentdash')} onBack={() => setScreen('home')} />}
-      {screen === 'parentdash' && <ParentDashboard config={config} sessions={sessions} progress={progress} manualUnlocks={manualUnlocks} onBack={() => setScreen('home')} />}
+      {screen === 'parentdash' && <ParentDashboard config={config} sessions={sessions} progress={progress} manualUnlocks={manualUnlocks} onUpdateConfig={handleUpdateConfig} onBack={() => setScreen('home')} />}
     </>
   );
 }
