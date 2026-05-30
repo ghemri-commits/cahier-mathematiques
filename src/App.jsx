@@ -236,6 +236,10 @@ function normalizeFracAnswer(s) {
     const g = mathGcd(Math.abs(parts[0]), Math.abs(parts[1]));
     return parts[1] / g === 1 ? String(parts[0] / g) : `${parts[0] / g}/${parts[1] / g}`;
   }
+  // Normalize decimals: "2.0" → "2", "1.50" → "1.5" (avoid mismatch for whole-number results)
+  if (!s.includes(' ') && s !== '' && !isNaN(parseFloat(s)) && isFinite(Number(s))) {
+    return String(parseFloat(s));
+  }
   return s;
 }
 
@@ -410,7 +414,7 @@ function generateProblemsForPage(levelId, bookletNum, pageNum) {
       const lcd = mathLcm(d1, d2);
       const v1 = n1 * (lcd / d1), v2 = n2 * (lcd / d2);
       const rawNum = isAdd ? v1 + v2 : Math.abs(v1 - v2);
-      if (rawNum === 0) return { display: `${n1}/${d1} + ${n2}/${d2}`, answer: normalizeFracAnswer(`${v1 + v2}/${lcd}`), op: '+', isFrac: true };
+      if (rawNum === 0) return { display: `${n1}/${d1} ${isAdd ? '+' : '−'} ${n2}/${d2}`, answer: isAdd ? normalizeFracAnswer(`${v1 + v2}/${lcd}`) : '0', op: isAdd ? '+' : '−', isFrac: true };
       const g = mathGcd(rawNum, lcd);
       const an = rawNum / g, ad = lcd / g;
       const left = isAdd ? `${n1}/${d1}` : (v1 >= v2 ? `${n1}/${d1}` : `${n2}/${d2}`);
@@ -765,7 +769,7 @@ function KumonWorksheetPage({ pageRef: ref, problems, startIndex, values, drawin
             );
           }
 
-          if (isDiv) {
+          if (isDiv && !p.display) {
             const hasRemainder = p.remainder !== undefined && p.remainder > 0;
             return (
               <div key={i} className={`flex items-center gap-3 sm:gap-6 group transition-transform duration-150 ${isCelebrating ? 'scale-110' : 'scale-100'}`}>
@@ -1468,7 +1472,7 @@ function ProblemDisplay({ p }) {
         if (fm) return <FracDisplay key={idx} num={fm[1]} den={fm[2]} />;
         return <span key={idx} className="mx-0.5 text-slate-600 font-bold">{part}</span>;
       })}
-      <span className="text-slate-300 mx-1">=</span>
+      {!p.display.includes('=') && <span className="text-slate-300 mx-1">=</span>}
     </>
   );
 }
