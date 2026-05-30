@@ -22,7 +22,7 @@ const DEFAULT_CONFIG = {
   parentEmail: '',
   deviceLockedToKid: null,
   geminiApiKey: '',
-  geminiModel: 'gemini-2.5-flash',
+  geminiModel: 'gemini-3.5-flash',
 };
 
 async function loadConfig() {
@@ -1425,12 +1425,13 @@ function ParentDashboard({ config, sessions, progress, manualUnlocks, onUpdateCo
                  />
                  <label className="text-sm font-bold text-slate-700">Modèle Gemini</label>
                  <select
-                   value={config.geminiModel || 'gemini-2.5-flash'}
+                   value={config.geminiModel || 'gemini-3.5-flash'}
                    onChange={e => onUpdateConfig({ ...config, geminiModel: e.target.value })}
                    className="border border-slate-300 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-blue-500 bg-white">
-                   <option value="gemini-2.5-flash">gemini-2.5-flash (recommandé)</option>
+                   <option value="gemini-3.5-flash">gemini-3.5-flash (recommandé)</option>
+                   <option value="gemini-3.1-pro">gemini-3.1-pro</option>
+                   <option value="gemini-2.5-flash">gemini-2.5-flash</option>
                    <option value="gemini-2.0-flash">gemini-2.0-flash</option>
-                   <option value="gemini-1.5-flash">gemini-1.5-flash</option>
                  </select>
                </div>
              </div>
@@ -1636,7 +1637,7 @@ function KaizoAssistant({ activeKid, currentLevel, config, onClose }) {
       return;
     }
 
-    const model = config.geminiModel || 'gemini-2.5-flash';
+    const model = config.geminiModel || 'gemini-3.5-flash';
     const kidCtx = activeKid ? `Élève: ${activeKid.name}, ${activeKid.age || 8} ans.` : '';
     const levelCtx = currentLevel ? `Niveau Kumon: ${currentLevel}.` : '';
     const fullPrompt = `${kidCtx} ${levelCtx}\nQuestion de l'élève: "${text}"`;
